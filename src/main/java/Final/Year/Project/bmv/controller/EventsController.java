@@ -1,0 +1,495 @@
+package Final.Year.Project.bmv.controller;
+
+import Final.Year.Project.bmv.dto.CompleteEventRequestDto;
+import Final.Year.Project.bmv.dto.EventDto;
+import Final.Year.Project.bmv.dto.VendorComparisonDto;
+import Final.Year.Project.bmv.dto.VendorServiceDto;
+import Final.Year.Project.bmv.entity.*;
+import Final.Year.Project.bmv.service.*;
+import Final.Year.Project.bmv.service.GooglePlacesService;
+import jakarta.transaction.Transactional;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@RestController
+@RequestMapping("/api/events")
+public class EventsController {
+
+    @Autowired private EventsService eventsService;
+    @Autowired private ServicesService servicesService;
+    @Autowired private VendorServiceService vendorServiceService;
+    @Autowired private VendorProfileService vendorProfileService;
+    @Autowired private ServiceRequestService serviceRequestService;
+    @Autowired private VendorServiceRequestService vendorServiceRequestService;
+    @Autowired private NotificationsService notificationsService;
+    @Autowired private BookingService bookingsService;
+    @Autowired private EventTypeService eventTypeService;
+    @Autowired private UsersService usersService;
+    @Autowired private TwillioService twillioService;
+    @Autowired private GooglePlacesService googlePlacesService;
+    @Autowired private VendorInviteService vendorInviteService;
+    @Autowired private RecommendationService recommendationService;
+    @Autowired private VendorMetricsService vendorMetricsService;
+
+    // List available services for event configuration
+    @GetMapping("/getAllServices")
+    public ResponseEntity<List<Services>> getAvailableServices() {
+        return ResponseEntity.ok(servicesService.getAllServices());
+    }
+
+    // Get top vendors for a given service at event date/location with intelligent recommendations
+    @GetMapping("/top-vendors")
+    public ResponseEntity<?> getTopVendorsForService(@RequestParam Map<String, String> map) {
+        try {
+            Long serviceId = Long.parseLong(map.get("serviceId"));
+            String city = map.get("city");
+            LocalDate eventDate = LocalDate.parse(map.get("eventDate"));
+            Integer guestCount = Integer.parseInt(map.get("guestCount"));
+            BigDecimal budgetMin = map.containsKey("budgetMin") ? new BigDecimal(map.get("budgetMin")) : BigDecimal.ZERO;
+            BigDecimal budgetMax = map.containsKey("budgetMax") ? new BigDecimal(map.get("budgetMax")) : new BigDecimal(100000);
+
+            // First try DB-backed query for top vendors
+            List<VendorService> dbList = vendorServiceService.findTopVendorsForService(serviceId, city, guestCount, java.util.Collections.emptyList());
+
+            // Apply intelligent recommendation scoring
+            List<?> recommended = recommendationService.recommendVendors(dbList, budgetMin, budgetMax, guestCount);
+
+            // If fewer than 3 results, supplement with Google Places API
+            if (recommended.size() < 3) {
+                try {
+                    Services svc = servicesService.getServiceById(serviceId);
+                    String serviceName = svc != null ? svc.getName() : map.getOrDefault("serviceName", "");
+                    int need = 5 - recommended.size();
+                    List<VendorServiceDto> google = googlePlacesService.searchPlacesForService(serviceName, city, need);
+
+                    // Return recommended DB vendors + supplementary Google vendors
+                    List<Object> merged = new ArrayList<>(recommended);
+                    merged.addAll(google);
+                    return ResponseEntity.ok(merged);
+                } catch (Exception ex) {
+                    ex.printStackTrace();
+                    // fallback to return DB recommendations even if small
+                    return ResponseEntity.ok(recommended);
+                }
+            }
+
+            return ResponseEntity.ok(recommended);
+        } catch (Exception ex) {
+            ex.printStackTrace();
+            return ResponseEntity.badRequest().body("Error fetching recommended vendors: " + ex.getMessage());
+        }
+    }
+
+    // Get vendor comparison data for multiple vendors
+    @GetMapping("/compare-vendors")
+    public ResponseEntity<?> compareVendors(@RequestParam("vendorIds") List<Long> vendorIds,
+                                            @RequestParam(value = "serviceId", required = false) Long serviceId) {
+        try {
+            List<VendorComparisonDto> comparisons = new ArrayList<>();
+
+            for (Long vendorId : vendorIds) {
+                VendorProfile vendor = vendorProfileService.getVendorProfileById(vendorId);
+                if (vendor == null) continue;
+
+                VendorMetrics metrics = vendorMetricsService.getMetrics(vendorId);
+
+                // Get services offered by this vendor
+                List<VendorService> vendorServices = vendorServiceService.getAllVendorServicesByVendorId(vendorId);
+                List<String> serviceNames = vendorServices.stream()
+                        .map(vs -> vs.getService().getName())
+                        .distinct()
+                        .collect(Collectors.toList());
+
+                // Calculate average pricing
+                BigDecimal avgPriceStart = vendorServices.stream()
+                        .filter(vs -> vs.getPriceRangeStart() != null)
+                        .map(VendorService::getPriceRangeStart)
+                        .reduce(BigDecimal.ZERO, BigDecimal::add);
+                if (!vendorServices.isEmpty()) {
+                    avgPriceStart = avgPriceStart.divide(new BigDecimal(vendorServices.size()), BigDecimal.ROUND_HALF_UP);
+                }
+
+                BigDecimal avgPriceEnd = vendorServices.stream()
+                        .filter(vs -> vs.getPriceRangeEnd() != null)
+                        .map(VendorService::getPriceRangeEnd)
+                        .reduce(BigDecimal.ZERO, BigDecimal::add);
+                if (!vendorServices.isEmpty()) {
+                    avgPriceEnd = avgPriceEnd.divide(new BigDecimal(vendorServices.size()), BigDecimal.ROUND_HALF_UP);
+                }
+
+                VendorComparisonDto dto = new VendorComparisonDto(
+                        vendorId,
+                        vendor.getBusinessName(),
+                        vendor.getRating(),
+                        vendor.getCity(),
+                        avgPriceStart,
+                        avgPriceEnd,
+                        null, // minGuests not universally applicable
+                        null, // maxGuests not universally applicable
+                        metrics != null ? metrics.getAcceptanceRate() : 0.0,
+                        metrics != null ? metrics.getCompletedJobs() : 0,
+                        metrics != null ? metrics.getAvgResponseTimeHours() : 0.0,
+                        vendor.getYearsOfExperience(),
+                        vendor.getBusinessDescription(),
+                        vendor.getBusinessLogoUrl(),
+                        serviceNames
+                );
+                comparisons.add(dto);
+            }
+
+            return ResponseEntity.ok(comparisons);
+        } catch (Exception ex) {
+            ex.printStackTrace();
+            return ResponseEntity.badRequest().body("Error comparing vendors: " + ex.getMessage());
+        }
+    }
+
+    // Client chooses a vendor for a service; service request is sent [expect: eventId, serviceId, vendorServiceId, budgetMin, budgetMax, guestCount, requirements, eventDate]
+    @PostMapping("/create-service-request")
+    public ResponseEntity<?> createServiceRequest(@RequestBody BookingPayload payload) {
+        List<Map<String, String>> servicesList = payload.getServices();
+        Events event = eventsService.getEventsById(Long.parseLong(payload.getEventId()));
+        servicesList.forEach(map -> {
+            Services service = servicesService.getServiceById(Long.parseLong(map.get("serviceId")));
+            Long vendorId = Long.parseLong(map.get("vendorId"));
+
+            ServiceRequest sr = ServiceRequest.builder()
+                    .event(event)
+                    .service(service)
+                    .budgetMin(new java.math.BigDecimal(0))
+                    .budgetMax(new java.math.BigDecimal(map.getOrDefault("budget", "0")))
+                    .guestCount(event.getGuestCount())
+                    .eventDate(event.getEventDate())
+                    .status(ServiceRequest.Status.OPEN)
+                    .createdAt(LocalDateTime.now())
+                    .updatedAt(LocalDateTime.now())
+                    .build();
+            sr = serviceRequestService.createServiceRequest(sr);
+
+            if (vendorId != null && vendorId >= 0) {
+                // Local vendor - create VendorServiceRequest record
+                VendorProfile vendor = vendorProfileService.getVendorProfileById(vendorId);
+                VendorServiceRequest vsr = VendorServiceRequest.builder()
+                        .serviceRequest(sr)
+                        .vendor(vendor)
+                        .proposedAmount(sr.getBudgetMax())
+                        .message("Service request for " + service.getName())
+                        .status(VendorServiceRequest.Status.PENDING)
+                        .createdAt(LocalDateTime.now())
+                        .updatedAt(LocalDateTime.now())
+                        .build();
+                vendorServiceRequestService.createVendorServiceRequest(vsr);
+
+                // Record request received in metrics
+                vendorMetricsService.recordRequestReceived(vendorId);
+            } else {
+                // Google-sourced vendor: persist invite + SMS with signup deep link (VendorServiceRequest created after vendor completes profile)
+                try {
+                    String vendorName = map.getOrDefault("vendorName", service.getName());
+                    String phone = googlePlacesService.getPhoneForVendorUniqueId(vendorId);
+                    if ((phone == null || phone.isBlank()) && map.containsKey("externalPlaceId")) {
+                        String pid = map.get("externalPlaceId");
+                        phone = googlePlacesService.getPhoneForPlaceId(pid);
+                    }
+                    String placeId = map.getOrDefault("externalPlaceId", null);
+                    VendorInvite invite = vendorInviteService.createForGoogleVendor(sr, phone, vendorName, placeId);
+                    String signupUrl = vendorInviteService.buildSignupUrl(invite.getToken());
+                    twillioService.sendVendorInvite(
+                            phone,
+                            vendorName,
+                            event.getTitle(),
+                            service.getName(),
+                            event.getEventDate().toString(),
+                            signupUrl
+                    );
+                } catch (Exception ex) {
+                    System.err.println("Error sending vendor invite SMS (Google vendor): " + ex.getMessage());
+                }
+            }
+        });
+
+        return ResponseEntity.ok("Event Created");
+    }
+
+    // Vendor responds to a service request [expect: vendorRequestId, response (ACCEPTED/REJECTED)]
+    @PostMapping("/respond-service-request/{vrId}")
+    public ResponseEntity<String> respondServiceRequest(@PathVariable Long vrId,@RequestBody Map<String, String> map) {
+        VendorServiceRequest vsr = vendorServiceRequestService.getVendorServiceRequestById(vrId);
+        if(vsr==null){
+            System.out.println("\n\nRSR ERROR");
+            return ResponseEntity.badRequest().body("Error");
+        }
+        vsr.setStatus(VendorServiceRequest.Status.valueOf(map.get("response").toUpperCase()));
+        System.out.println("\n\nStatus now: "+vsr.getStatus());
+        vsr.setUpdatedAt(LocalDateTime.now());
+        vendorServiceRequestService.updateVendorServiceRequest(vsr.getVendorRequestId(), vsr);
+
+        VendorProfile vendor = vsr.getVendor();
+        Long vendorId = vendor.getVendorId();
+
+        // If declined, notify client and update metrics
+        if (vsr.getStatus() == VendorServiceRequest.Status.REJECTED) {
+            // Update metrics - record rejection
+            vendorMetricsService.recordRejection(vendorId);
+
+            Events event = vsr.getServiceRequest().getEvent();
+            Notifications notification = Notifications.builder()
+                    .user(event.getClient())
+                    .title("Vendor declined for service")
+                    .message("Choose another vendor for " + event.getTitle())
+                    .notificationType("VENDOR_DECLINE")
+                    .referenceId(event.getEventId())
+                    .isRead(false)
+                    .createdAt(LocalDateTime.now())
+                    .build();
+            notificationsService.createNotification(notification);
+
+            try {
+                Users client = event.getClient();
+                String customerName = client != null ? (client.getFirstName() + " " + client.getLastName()).trim() : "";
+                String serviceName = vsr.getServiceRequest().getService() != null ? vsr.getServiceRequest().getService().getName() : "";
+                String eventDate = event.getEventDate() != null ? event.getEventDate().toString() : "";
+                twillioService.sendVendorRejected(client != null ? client.getPhone() : null, customerName, serviceName, eventDate);
+            } catch (Exception ex) {
+                System.err.println("Error sending SMS vendor_rejected: " + ex.getMessage());
+            }
+            return ResponseEntity.ok("Vendor response updated");
+        }
+
+        // If accepted, CREATE BOOKING record and update metrics
+        if (vsr.getStatus() == VendorServiceRequest.Status.ACCEPTED) {
+            // Update metrics - record acceptance
+            vendorMetricsService.recordAcceptance(vendorId);
+
+            Events event = vsr.getServiceRequest().getEvent();
+            event.setStatus(Events.Status.PLANNING);
+            event.setUpdatedAt(LocalDateTime.now());
+            eventsService.updateEvents(event.getEventId(),event);
+            Bookings booking = Bookings.builder()
+                    .event(event)
+                    .vendorServiceRequest(vsr)
+                    .vendor(vendor)
+                    .bookingDate(LocalDateTime.now())
+                    .bookingStatus(Bookings.BookingStatus.CONFIRMED)
+                    .amount(vsr.getProposedAmount() != null ? vsr.getProposedAmount() : BigDecimal.ZERO)
+                    .paymentStatus(Bookings.PaymentStatus.PENDING)
+                    .notes("Booking created after vendor confirmation")
+                    .createdAt(LocalDateTime.now())
+                    .updatedAt(LocalDateTime.now())
+                    .build();
+            bookingsService.createBookings(booking);
+            Notifications notification = Notifications.builder()
+                    .user(event.getClient())
+                    .title("Update")
+                    .message("Vendor accepted service request for " + event.getTitle())
+                    .notificationType("VENDOR_ACCEPT")
+                    .referenceId(event.getEventId())
+                    .isRead(false)
+                    .createdAt(LocalDateTime.now())
+                    .build();
+            notificationsService.createNotification(notification);
+
+            try {
+                Users client = event.getClient();
+                String customerName = client != null ? (client.getFirstName() + " " + client.getLastName()).trim() : "";
+                String bookingName = vsr.getServiceRequest().getService() != null ? vsr.getServiceRequest().getService().getName() : "";
+                String eventDate = event.getEventDate() != null ? event.getEventDate().toString() : "";
+                twillioService.sendVendorConfirmed(client != null ? client.getPhone() : null, customerName, bookingName, eventDate);
+            } catch (Exception ex) {
+                System.err.println("Error sending SMS vendor_confirmed: " + ex.getMessage());
+            }
+
+            return ResponseEntity.ok("Vendor accepted and booking confirmed.");
+        }
+        return ResponseEntity.ok("Vendor response updated");
+    }
+
+    // Confirm event after all required services confirmed [expect: eventId]
+    @PostMapping("/confirm")
+    public ResponseEntity<String> confirmEvent(@RequestBody Map<String, String> map) {
+        Long eventId = Long.parseLong(map.get("eventId"));
+        Events event = eventsService.getEventsById(eventId);
+
+        List<ServiceRequest> requests = serviceRequestService.getAllServiceRequests().stream()
+                .filter(req -> req.getEvent().getEventId().equals(eventId))
+                .collect(Collectors.toList());
+
+        boolean allConfirmed = true;
+        for (ServiceRequest req : requests) {
+            boolean accepted = vendorServiceRequestService.getAllVendorServiceRequests().stream()
+                    .anyMatch(vreq -> vreq.getServiceRequest().getRequestId().equals(req.getRequestId())
+                            && vreq.getStatus() == VendorServiceRequest.Status.ACCEPTED);
+            if (!accepted) {
+                allConfirmed = false;
+                break;
+            }
+        }
+        if (allConfirmed) {
+            event.setStatus(Events.Status.CONFIRMED);
+            event.setUpdatedAt(LocalDateTime.now());
+            eventsService.updateEvents(eventId, event);
+            return ResponseEntity.ok("Event confirmed");
+        } else {
+            return ResponseEntity.badRequest().body("Some services not yet confirmed by vendors");
+        }
+    }
+
+    // Additional basic CRUD endpoints
+    @GetMapping
+    public ResponseEntity<List<Events>> getAllEvents() {
+        return ResponseEntity.ok(eventsService.getAllEvents());
+    }
+
+    @GetMapping("/{eventId}")
+    public ResponseEntity<Events> getEventById(@PathVariable Long eventId) {
+        return ResponseEntity.ok(eventsService.getEventsById(eventId));
+    }
+
+    @PutMapping("/{eventId}")
+    public ResponseEntity<Events> updateEvent(@PathVariable Long eventId, @RequestBody Map<String, String> map) {
+        Events existing = eventsService.getEventsById(eventId);
+        if (map.containsKey("eventTypeId")) existing.setEventType(eventTypeService.getEventTypeById(Long.parseLong(map.get("eventTypeId"))));
+        if (map.containsKey("title")) existing.setTitle(map.get("title"));
+        if (map.containsKey("description")) existing.setDescription(map.get("description"));
+        if (map.containsKey("eventDate")) existing.setEventDate(LocalDate.parse(map.get("eventDate")));
+        if (map.containsKey("startTime")) existing.setStartTime(LocalTime.parse(map.get("startTime")));
+        if (map.containsKey("guestCount")) existing.setGuestCount(Integer.parseInt(map.get("guestCount")));
+        if (map.containsKey("venueAddress")) existing.setVenueAddress(map.get("venueAddress"));
+        if (map.containsKey("status")) existing.setStatus(Events.Status.valueOf(map.get("status").toUpperCase()));
+        existing.setUpdatedAt(LocalDateTime.now());
+        Events updatedEvent = eventsService.updateEvents(eventId, existing);
+        return ResponseEntity.ok(updatedEvent);
+    }
+
+    @DeleteMapping("/{eventId}")
+    public ResponseEntity<Void> deleteEvent(@PathVariable Long eventId) {
+        eventsService.deleteEvents(eventId);
+        return ResponseEntity.noContent().build();
+    }
+
+    @GetMapping("/getEventTypes")
+    public ResponseEntity<?> getEventTypes(){
+        return ResponseEntity.ok(eventTypeService.getAllEventTypes());
+    }
+
+    @PostMapping("/newEvent")
+    @Transactional
+    public ResponseEntity<?> createEventFromBooking(@RequestBody Map<String, String> bookingData) {
+        try {
+            if (bookingData == null) {
+                return ResponseEntity.badRequest().body("bookingData is required");
+            }
+            System.out.println(bookingData);
+            LocalDate eventDate = LocalDate.parse(bookingData.get("eventDate"));
+            LocalTime startTime = LocalTime.parse(bookingData.get("eventTime"));
+            Integer guestCount = Integer.parseInt(bookingData.get("guestCount"));
+            String specialRequests = bookingData.getOrDefault("specialRequests", "");
+            String venue = bookingData.getOrDefault("venue", bookingData.getOrDefault("venueAddress", null));
+            EventTypes evtType = eventTypeService.getEventTypeById(Long.parseLong(bookingData.get("eventType")));
+            Long UserId = Long.parseLong(bookingData.get("userId"));
+
+            Users client = usersService.getUserById(UserId);
+            if (client == null) {
+                return ResponseEntity.badRequest().body("Invalid UserId.");
+            }
+
+            if (evtType == null) {
+                return ResponseEntity.badRequest().body("Invalid Event Type.");
+            }
+            Events event = Events.builder()
+                    .client(client)
+                    .eventType(evtType)
+                    .title("Event - " + (evtType != null ? evtType.getName() : "General"))
+                    .description(specialRequests)
+                    .eventDate(eventDate)
+                    .startTime(startTime)
+                    .guestCount(guestCount)
+                    .venueAddress(venue)
+                    .status(Events.Status.DRAFT)
+                    .createdAt(LocalDateTime.now())
+                    .updatedAt(LocalDateTime.now())
+                    .build();
+
+            Events created = eventsService.createEvents(event);
+
+            return ResponseEntity.ok(String.valueOf(created.getEventId()));
+
+        } catch (Exception ex) {
+            ex.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Failed to create event: " + ex.getMessage());
+        }
+    }
+
+    @GetMapping("/client/{cid}")
+    public ResponseEntity<?> getClientEvents(@PathVariable Long cid){
+        List<Events> el=eventsService.getClientEvents(cid);
+        List<EventDto> evdto = el.stream().map(EventDto::from).toList();
+        return ResponseEntity.ok(evdto);
+    }
+
+    @GetMapping("/next-top-vendors")
+    public ResponseEntity<List<VendorServiceDto>> getNextTopVendorsForService(
+            @RequestParam Long requestId,
+            @RequestParam String city,
+            @RequestParam Integer guestCount
+    ) {
+        // Load the service request to determine the requested service
+        ServiceRequest sr = serviceRequestService.getServiceRequestById(requestId);
+        Long serviceId = sr.getService().getServiceId();
+
+        // Get vendor ids that already rejected this service request
+        List<Long> rejectedVendorIds = vendorServiceRequestService.getRejectedVendorsId(requestId);
+
+        // Delegate to service method that queries DB (with pagination) and applies exclusions
+        List<VendorService> top = vendorServiceService.findTopVendorsForService(serviceId, city, guestCount, rejectedVendorIds);
+        List<VendorServiceDto> dtos = top.stream().map(VendorServiceDto::from).toList();
+        return ResponseEntity.ok(dtos);
+    }
+
+    @GetMapping("/eventDetailsResp/{eid}")
+    public ResponseEntity<?> getDetailedResponse(@PathVariable Long eid){
+        return ResponseEntity.ok(eventsService.getEventDetails(eid));
+    }
+
+    @PostMapping("/create-fresh-request")
+    public ResponseEntity<?> createFreshRequest(@RequestBody Map<String,String> payload) {
+        Events event = eventsService.getEventsById(Long.parseLong(payload.get("eventId")));
+        VendorProfile vendor = vendorProfileService.getVendorProfileById(Long.parseLong(payload.get("vendorId")));
+
+        ServiceRequest sr = serviceRequestService.getServiceRequestById(Long.parseLong(payload.get("requestId")));
+
+        VendorServiceRequest vsr = VendorServiceRequest.builder()
+                .serviceRequest(sr)
+                .vendor(vendor)
+                .proposedAmount(sr.getBudgetMax())
+                .message("Service request for " + sr.getService().getName())
+                .status(VendorServiceRequest.Status.PENDING)
+                .createdAt(LocalDateTime.now())
+                .updatedAt(LocalDateTime.now())
+                .build();
+        vendorServiceRequestService.createVendorServiceRequest(vsr);
+
+        return ResponseEntity.ok("New Service Request Created");
+    }
+
+    @PostMapping("/complete/{eventId}")
+    public ResponseEntity<?> completeEvent(
+            @PathVariable Long eventId,
+            @RequestBody CompleteEventRequestDto dto
+            ) {
+        dto.setEventId(eventId);
+        Users user = usersService.getUserById(dto.getUserId());
+        eventsService.completeEvent(dto, user);
+        return ResponseEntity.ok("Event completed successfully");
+    }
+}
+
