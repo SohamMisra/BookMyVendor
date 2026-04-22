@@ -28,6 +28,14 @@ export const fetchRecommendedVendors = async (params) => {
   return resp;
 };
 
+export const fetchVendorComparison = async (vendorIds, serviceId) => {
+  const params = new URLSearchParams();
+  vendorIds.forEach(id => params.append('vendorIds', id));
+  if (serviceId) params.append('serviceId', serviceId);
+  const resp = await api.get(`/events/compare-vendors?${params.toString()}`);
+  return resp;
+};
+
 export const VendorOnBoarding = async (params) => {
   const resp = await api.post(`/vendors/profile`, params);
   return resp;

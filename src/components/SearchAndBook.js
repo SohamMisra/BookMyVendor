@@ -9,6 +9,7 @@ import {
   Modal,
 } from "react-bootstrap";
 import { motion } from "framer-motion";
+import axios from "axios";
 import {
   FaSearch,
   FaStar,
@@ -18,13 +19,55 @@ import {
   FaUsers,
   FaRupeeSign,
   FaCheckCircle,
+  FaArrowRight,
 } from "react-icons/fa";
 import BookingModal from "../components/BookingModal";
+import VendorRecommendationCard from "../components/VendorRecommendationCard";
+import VendorComparison from "../components/VendorComparison";
+import UnifiedVendorCard from "../components/UnifiedVendorCard";
 import {
   fetchAllServicesAvailable,
   fetchAllEventTypes,
   fetchRecommendedVendors,
+  fetchVendorComparison,
 } from "../services/api";
+
+// Google Places API utility
+const GOOGLE_API_KEY = process.env.GOOGLEPLACES_API_KEY; // Replace with your actual key
+const googlePlacesSearch = async (query, location) => {
+  const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query + ' in ' + location)}&key=${GOOGLE_API_KEY}`;
+  try {
+    const response = await axios.get(url);
+    return response.data.results || [];
+  } catch (err) {
+    console.error("Google Places API error", err);
+    return [];
+  }
+};
+
+// Convert Google Place data to vendor format compatible with comparison
+const convertGooglePlaceToVendor = (place, index) => ({
+  vendorId: `google_${place.place_id}`,
+  isGooglePlace: true,
+  vendorName: place.name,
+  businessName: place.name,
+  vendorRating: place.rating || 0,
+  rating: place.rating || 0,
+  city: place.formatted_address?.split(',')[1]?.trim() || 'N/A',
+  location: place.formatted_address || 'N/A',
+  formatted_address: place.formatted_address,
+  priceRangeStart: 0,
+  priceRangeEnd: 0,
+  businessDescription: `Rating: ${place.rating || 'N/A'} • ${place.user_ratings_total || 0} reviews`,
+  businessLogoUrl: place.photos?.[0] ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photoreference=${place.photos[0].photo_reference}&key=${GOOGLE_API_KEY}` : '/default-avatar.png',
+  completedJobs: place.user_ratings_total || 0,
+  acceptanceRate: (place.rating || 5) / 5,
+  yearsOfExperience: 0,
+  avgResponseTimeHours: 24,
+  services: [],
+  googlePlaceId: place.place_id,
+  googlePlace: true
+});
 
 const eventServiceMap = {
   Wedding: [
@@ -99,9 +142,14 @@ const SearchAndBook = () => {
   const [isSearching, setIsSearching] = useState(false);
   const [showResults, setShowResults] = useState(false);
   const [showBookingModal, setShowBookingModal] = useState(false);
+  const [showComparisonView, setShowComparisonView] = useState(false);
   // removed single bookingVendor approach; we'll store selected vendors per service
   const [bookingVendor, setBookingVendor] = useState(null);
   const [recommendedByService, setRecommendedByService] = useState({}); // { [serviceId]: [vendor,...] }
+
+  // Google Places results
+  const [googleVendors, setGoogleVendors] = useState([]);
+  const [showGoogleResults, setShowGoogleResults] = useState(false);
 
   // NEW: selected vendor per serviceId -> vendor object
   const [selectedVendorsByService, setSelectedVendorsByService] = useState({});
@@ -247,9 +295,15 @@ const SearchAndBook = () => {
 
   const toggleCompare = (vendor) => {
     setCompareList((prev) => {
-      const exists = prev.find((v) => v.vendorId === vendor.vendorId);
-      if (exists) return prev.filter((v) => v.vendorId !== vendor.vendorId);
-      if (prev.length < 3) return [...prev, vendor];
+      const existingIndex = prev.findIndex((v) => v.vendorId === vendor.vendorId);
+      if (existingIndex > -1) {
+        // Remove if already exists
+        return prev.filter((_, idx) => idx !== existingIndex);
+      }
+      // Add if not comparing more than 3 vendors
+      if (prev.length < 3) {
+        return [...prev, vendor];
+      }
       return prev;
     });
   };
@@ -373,21 +427,19 @@ const SearchAndBook = () => {
 
             <div className="mt-auto">
               <Row className="g-2">
-                <Col>
+                <Col xs={12} lg={6}>
                   <Button
-                    variant="outline-primary"
+                    variant={compareList.find(v => v.vendorId === vendor.vendorId) ? "warning" : "outline-secondary"}
                     size="sm"
                     className="w-100"
-                    onClick={() => {
-                      /* view details */
-                      setBookingVendor(vendor); // allow quick preview in modal if you want
-                      // NOTE: do not open the booking modal here in the new flow
-                    }}
+                    onClick={() => toggleCompare(vendor)}
+                    title="Add to comparison"
                   >
-                    View Details
+                    <FaExchangeAlt className="me-1" />
+                    {compareList.find(v => v.vendorId === vendor.vendorId) ? "In Compare" : "Compare"}
                   </Button>
                 </Col>
-                <Col>
+                <Col xs={12} lg={6}>
                   <Button
                     variant="primary"
                     size="sm"
@@ -442,7 +494,7 @@ const SearchAndBook = () => {
             </p>
           </div>
           {compareList.length > 0 && (
-            <Button variant="warning" className="btn-modern">
+            <Button variant="warning" className="btn-modern" onClick={() => setShowComparisonView(true)}>
               <FaExchangeAlt className="me-2" />
               Compare ({compareList.length})
             </Button>
@@ -677,11 +729,31 @@ const SearchAndBook = () => {
             className="w-100 btn-modern gradient-primary"
             onClick={async () => {
               setIsSearching(true);
-              await recommendedVendors(); // fetches for all selected services & caches
               setShowResults(false);
+              setShowGoogleResults(false);
+              
+              // Fetch from Google Places
+              let googleResults = [];
+              if (eventType?.name && location) {
+                let keyword = eventType.name;
+                // Map event type to business keywords
+                if (/wedding/i.test(keyword)) keyword = "wedding planner OR wedding venue";
+                else if (/birthday/i.test(keyword)) keyword = "birthday party organizer OR event venue";
+                else if (/conference/i.test(keyword)) keyword = "conference venue OR event space";
+                else if (/photography/i.test(keyword)) keyword = "photographer";
+                else if (/catering/i.test(keyword)) keyword = "caterer OR catering service";
+                
+                googleResults = await googlePlacesSearch(keyword, location);
+                setGoogleVendors(googleResults.slice(0, 9).map((place, idx) => convertGooglePlaceToVendor(place, idx)));
+              }
+              
+              // Fetch your own recommended vendors
+              await recommendedVendors();
+              
               setTimeout(() => {
                 setIsSearching(false);
                 setShowResults(true);
+                setShowGoogleResults(googleResults.length > 0);
               }, 600);
             }}
           >
@@ -710,29 +782,78 @@ const SearchAndBook = () => {
 
       {showResults && (
         <div className="mt-4">
+          {/* Compare Button in Results */}
+          {compareList.length > 0 && (
+            <div className="mb-4">
+              <Button
+                variant="warning"
+                size="lg"
+                onClick={() => setShowComparisonView(true)}
+                className="d-flex align-items-center justify-content-center w-100"
+              >
+                <FaExchangeAlt className="me-2" />
+                Compare {compareList.length} Vendors
+              </Button>
+            </div>
+          )}
+
+          {/* Google Places Results */}
+          {showGoogleResults && googleVendors.length > 0 && (
+            <div className="mb-4">
+              <h4 className="d-flex align-items-center mb-3">
+                <span>Vendors from Google</span>
+                <small className="text-muted ms-2">(Local Businesses)</small>
+              </h4>
+              <Row className="g-3">
+                {googleVendors.map((vendor) => (
+                  <Col md={6} lg={4} key={vendor.vendorId} className="mb-3">
+                    <UnifiedVendorCard
+                      vendor={vendor}
+                      isInCompare={Boolean(compareList.find(v => v.vendorId === vendor.vendorId))}
+                      onCompare={toggleCompare}
+                      showServiceButtons={false}
+                    />
+                  </Col>
+                ))}
+              </Row>
+            </div>
+          )}
+
           {availableServices.map(({ serviceId, name }) =>
             selectedServices[String(serviceId)] &&
             recommendedByService[String(serviceId)]?.length > 0 ? (
               <div key={serviceId} className="mb-4">
-                <h4 className="d-flex justify-content-between align-items-center">
+                <h4 className="d-flex justify-content-between align-items-center mb-3">
                   <span>{name} Services</span>
                   <small className="text-muted">
                     {selectedVendorsByService[String(serviceId)] ? (
                       <>
-                        Selected:{" "}
-                        {selectedVendorsByService[String(serviceId)].vendorName}
+                        <FaCheckCircle className="me-2 text-success" />
+                        Selected: {selectedVendorsByService[String(serviceId)].vendorName}
                       </>
                     ) : (
-                      "No selection"
+                      "No selection yet"
                     )}
                   </small>
                 </h4>
-                <Row>
-                  {recommendedByService[String(serviceId)].map((vs) => {
-                    const vendor = vs.vendor ? vs.vendor : vs;
+                <Row className="g-3">
+                  {recommendedByService[String(serviceId)].map((vs, idx) => {
+                    const isSelected =
+                      selectedVendorsByService[String(serviceId)] &&
+                      selectedVendorsByService[String(serviceId)].vendorId ===
+                        (vs.vendorId || vs.vendor?.vendorId);
+
                     return (
-                      <Col md={4} key={vendor.vendorId} className="mb-3">
-                        <VendorCard vendor={vendor} serviceId={serviceId} />
+                      <Col md={6} lg={4} key={`${serviceId}-${idx}`}>
+                        <UnifiedVendorCard
+                          vendor={vs}
+                          serviceId={serviceId}
+                          isSelectedForService={isSelected}
+                          isInCompare={Boolean(compareList.find(v => v.vendorId === vs.vendorId))}
+                          onSelect={(vendor) => selectVendorForService(serviceId, vendor)}
+                          onCompare={toggleCompare}
+                          showServiceButtons={true}
+                        />
                       </Col>
                     );
                   })}
@@ -742,7 +863,7 @@ const SearchAndBook = () => {
           )}
 
           {/* CONTINUE button - only enabled when user has selected one vendor for every required service */}
-          <div className="d-flex justify-content-end mt-3">
+          <div className="d-flex justify-content-end mt-4">
             <Button
               variant="success"
               size="lg"
@@ -753,8 +874,9 @@ const SearchAndBook = () => {
                 // open BookingModal with entire selection
                 setShowBookingModal(true);
               }}
+              className="btn-modern"
             >
-              Continue to Booking
+              Continue to Booking <FaArrowRight className="ms-2" />
             </Button>
           </div>
         </div>
@@ -773,6 +895,44 @@ const SearchAndBook = () => {
           eventType?.eventTypeId ? Number(eventType.eventTypeId) : null
         }
       />
+
+      {/* Vendor Comparison Modal */}
+      {showComparisonView && (
+        <Modal
+          show={showComparisonView}
+          onHide={() => setShowComparisonView(false)}
+          size="xl"
+          fullscreen="lg"
+          centered
+        >
+          <Modal.Header closeButton>
+            <Modal.Title>Vendor Comparison</Modal.Title>
+          </Modal.Header>
+          <Modal.Body className="p-0">
+            <VendorComparison
+              vendors={compareList}
+              onClose={() => setShowComparisonView(false)}
+              onSelectVendor={(vendor) => {
+                // For Google places, just close the comparison view
+                if (vendor.isGooglePlace) {
+                  setShowComparisonView(false);
+                  return;
+                }
+                // Find the service this vendor belongs to and select it
+                Object.keys(recommendedByService).forEach((serviceId) => {
+                  const found = recommendedByService[serviceId].find(
+                    (v) => (v.vendorId || v.vendor?.vendorId) === vendor.vendorId
+                  );
+                  if (found) {
+                    selectVendorForService(Number(serviceId), vendor);
+                  }
+                });
+                setShowComparisonView(false);
+              }}
+            />
+          </Modal.Body>
+        </Modal>
+      )}
     </Container>
   );
 };
