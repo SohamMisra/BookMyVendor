@@ -259,8 +259,8 @@ const UnifiedVendorCard = ({
                 </Button>
               </Col>
 
-              {/* Service-Specific Select Button - Show only if serviceId provided and not Google vendor */}
-              {showServiceButtons && serviceId && !isGoogleVendor && (
+              {/* Service-Specific Select Button - Show for both DB and Google vendors */}
+              {showServiceButtons && serviceId && (
                 <Col xs={6}>
                   <Button
                     variant={isSelectedForService ? "success" : "primary"}
@@ -280,8 +280,8 @@ const UnifiedVendorCard = ({
                 </Col>
               )}
 
-              {/* Open in Google Maps - For Google vendors only */}
-              {isGoogleVendor && (
+              {/* Open in Google Maps - For Google vendors only (if no Select button) */}
+              {isGoogleVendor && (showServiceButtons || serviceId) && (
                 <Col xs={showServiceButtons ? 6 : 12}>
                   <a
                     href={`https://www.google.com/maps/place/?q=place_id:${vendor.externalPlaceId || "error"}`}

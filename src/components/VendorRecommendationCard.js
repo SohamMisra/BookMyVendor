@@ -1,13 +1,33 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Card, Badge, Row, Col, Button } from "react-bootstrap";
-import { FaStar, FaTrophy, FaCheckCircle, FaClock } from "react-icons/fa";
+import { FaStar, FaTrophy, FaCheckCircle, FaClock, FaShieldAlt } from "react-icons/fa";
+import axios from "axios";
 import "./VendorRecommendationCard.css";
 
 /**
  * VendorRecommendationCard displays a single recommended vendor with scoring details.
- * Shows recommendation score, reasoning, and vendor metrics.
+ * Shows recommendation score, reasoning, vendor metrics, and AI/ML reliability index.
  */
 const VendorRecommendationCard = ({ vendor, onSelect, isSelected }) => {
+  const [reliabilityScore, setReliabilityScore] = useState(null);
+  const [loadingReliability, setLoadingReliability] = useState(false);
+
+  useEffect(() => {
+    fetchReliabilityScore();
+  }, [vendor.vendorId]);
+
+  const fetchReliabilityScore = async () => {
+    try {
+      setLoadingReliability(true);
+      const response = await axios.get(`/api/ml/vendors/${vendor.vendorId}/reliability`);
+      setReliabilityScore(response.data);
+    } catch (err) {
+      console.error('Failed to fetch reliability score:', err);
+    } finally {
+      setLoadingReliability(false);
+    }
+  };
+
   const formatCurrency = (n) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
   const formatScore = (n) => (n ? `${(n * 100).toFixed(0)}%` : "N/A");
 
@@ -16,6 +36,21 @@ const VendorRecommendationCard = ({ vendor, onSelect, isSelected }) => {
     if (score >= 0.8) return "#28a745"; // Green
     if (score >= 0.6) return "#ffc107"; // Yellow
     return "#dc3545"; // Red
+  };
+
+  const getRiskColor = (riskLevel) => {
+    switch (riskLevel) {
+      case 'LOW_RISK':
+        return '#28a745';
+      case 'MEDIUM_RISK':
+        return '#ffc107';
+      case 'HIGH_RISK':
+        return '#fd7e14';
+      case 'CRITICAL_RISK':
+        return '#dc3545';
+      default:
+        return '#6c757d';
+    }
   };
 
   return (
@@ -61,6 +96,24 @@ const VendorRecommendationCard = ({ vendor, onSelect, isSelected }) => {
             {vendor.reasoning}
           </Badge>
         </div>
+
+        {/* AI/ML Reliability Score */}
+        {reliabilityScore && !loadingReliability && (
+          <div className="reliability-section mb-3 p-2 rounded" style={{ backgroundColor: `${getRiskColor(reliabilityScore.riskLevel)}15`, borderLeft: `3px solid ${getRiskColor(reliabilityScore.riskLevel)}` }}>
+            <Row className="align-items-center">
+              <Col xs="auto">
+                <FaShieldAlt style={{ color: getRiskColor(reliabilityScore.riskLevel), fontSize: '1.2rem' }} />
+              </Col>
+              <Col>
+                <label className="metric-label mb-1">Reliability Index</label>
+                <p className="metric-value mb-1">{reliabilityScore.reliabilityScore.toFixed(1)}/100</p>
+                <small style={{ color: getRiskColor(reliabilityScore.riskLevel), fontWeight: 'bold' }}>
+                  {reliabilityScore.riskLevel}
+                </small>
+              </Col>
+            </Row>
+          </div>
+        )}
 
         {/* Pricing */}
         <Row className="section-row mb-3">

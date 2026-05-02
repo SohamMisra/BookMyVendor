@@ -46,6 +46,7 @@ import {
 } from "../services/api"; // <-- make sure this path matches your project
 import { useNavigate } from "react-router-dom";
 import ProfileImageUpload from "../services/ImageUpload";
+import AIMLDashboard from "../components/AIMLDashboard";
 
 const VendorDashboard = () => {
   const [activeTab, setActiveTab] = useState("overview");
@@ -851,6 +852,18 @@ const VendorDashboard = () => {
               </Card>
             </Col>
           </Row>
+        </Tab>
+
+        <Tab
+          eventKey="analytics"
+          title={
+            <>
+              <FaChartLine className="me-2" />
+              Analytics
+            </>
+          }
+        >
+          <AIMLDashboard vendorId={parseInt(sessionStorage.getItem("vendorId"))} />
         </Tab>
       </Tabs>
 

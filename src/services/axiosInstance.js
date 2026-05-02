@@ -4,7 +4,7 @@ const axiosInstance = axios.create({
   baseURL: process.env.REACT_APP_BEURL,
   headers: {
     "Content-Type": "application/json",
-    "ngrok-skip-browser-warning": "true", 
+    //"ngrok-skip-browser-warning": "true", 
   },
   timeout: 15000,
 });

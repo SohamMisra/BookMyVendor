@@ -151,3 +151,26 @@ export const markNotificationRead = async (payload) => {
   const resp = await api.post(`/users/readNoti`,payload);
   return resp;
 };
+
+// ML/AI Analytics Endpoints
+export const getVendorReliability = async (vendorId) => {
+  const resp = await api.get(`/ml/vendors/${vendorId}/reliability`);
+  return resp;
+};
+
+export const getReviewSentimentAnalysis = async (reviewId) => {
+  const resp = await api.get(`/ml/reviews/${reviewId}/sentiment`);
+  return resp;
+};
+
+export const getDemandForecast = async (vendorId, days = 30) => {
+  const resp = await api.get(`/ml/vendors/${vendorId}/demand-forecast`, {
+    params: { days }
+  });
+  return resp;
+};
+
+export const getVendorReviewsSummary = async (vendorId) => {
+  const resp = await api.get(`/ml/vendors/${vendorId}/reviews/summary`);
+  return resp;
+};
