@@ -18,7 +18,7 @@ import java.util.Map;
  */
 @RestController
 @RequestMapping("/api/external-vendors")
-@CrossOrigin(origins = "http://localhost:3000")
+//@CrossOrigin(origins = "http://localhost:3000")
 public class ExternalVendorController {
 
     @Autowired

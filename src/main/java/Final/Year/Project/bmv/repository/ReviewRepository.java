@@ -10,6 +10,5 @@ import java.util.List;
 public interface ReviewRepository extends JpaRepository<Reviews, Long> {
     boolean existsByBooking_VendorServiceRequest_VendorRequestId(Long vendorServiceRequestId);
     List<Reviews> findByVendor_UserId(Long userId);
-
 }
 
