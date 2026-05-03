@@ -5,6 +5,12 @@ export const UserLogin = (loginData) => {
   return re;
 };
 
+export const getPublicVendorInvite = (token) =>
+  api.get(`/public/vendor-invite/${encodeURIComponent(token)}`);
+
+export const submitContactMessage = (payload) =>
+  api.post(`/otp/email/contact`, payload);
+
 export const UserRegister = (registerData) =>
   api.post(`/users/signup`, registerData);
 

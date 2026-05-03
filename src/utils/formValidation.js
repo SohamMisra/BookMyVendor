@@ -3,7 +3,8 @@
  */
 
 export function trim(v) {
-  return (v ?? "").trim();
+  if (v == null) return "";
+  return String(v).trim();
 }
 
 export function isNonEmpty(v) {
@@ -15,14 +16,18 @@ export function isValidEmail(v) {
   return EMAIL_RE.test(trim(v));
 }
 
-/** Indian mobile: 10 digits; allows optional +91 / 91 prefix and spaces */
+/** Indian mobile: 10 digits; allows +91 / 91 / 091 / 0091, spaces, dashes, parens, dots; strips a single leading 0 on 11-digit local numbers */
 export function isValidIndiaMobile(v) {
-  const s = trim(v).replace(/\s/g, "");
+  const raw = trim(v);
+  if (!raw) return false;
+  let s = raw.replace(/[\s\-\(\)\.]/g, "");
   if (!s) return false;
-  let digits = s;
-  if (digits.startsWith("+91")) digits = digits.slice(3);
-  else if (digits.startsWith("91") && digits.length === 12) digits = digits.slice(2);
-  return /^\d{10}$/.test(digits);
+  if (s.startsWith("+91")) s = s.slice(3);
+  else if (s.startsWith("0091")) s = s.slice(4);
+  else if (s.startsWith("091")) s = s.slice(3);
+  else if (s.startsWith("91") && s.length >= 12) s = s.slice(2);
+  if (s.startsWith("0") && s.length === 11) s = s.slice(1);
+  return /^\d{10}$/.test(s);
 }
 
 export function isValidIndiaMobileOptional(v) {
@@ -36,16 +41,18 @@ export function isValidPincodeIN(v) {
 
 export const PASSWORD_MIN_LENGTH = 8;
 
-export function validateLogin({ email, password }) {
+export function validateLogin({ email, password, passwordHash }) {
+  const pwd = password ?? passwordHash ?? "";
   const errors = {};
   if (!isNonEmpty(email)) errors.email = "Email is required.";
   else if (!isValidEmail(email)) errors.email = "Enter a valid email address.";
-  if (!isNonEmpty(password)) errors.password = "Password is required.";
+  if (!isNonEmpty(pwd)) errors.password = "Password is required.";
   return { valid: Object.keys(errors).length === 0, errors };
 }
 
 export function validateSignup(data) {
   const errors = {};
+  const pwd = trim(data.passwordHash ?? data.password ?? "");
   if (!isNonEmpty(data.firstName)) errors.firstName = "First name is required.";
   if (!isNonEmpty(data.lastName)) errors.lastName = "Last name is required.";
   if (!isNonEmpty(data.email)) errors.email = "Email is required.";
@@ -54,13 +61,13 @@ export function validateSignup(data) {
   else if (!isValidIndiaMobile(data.phone)) {
     errors.phone = "Enter a valid 10-digit mobile number.";
   }
-  if (!isNonEmpty(data.passwordHash)) errors.passwordHash = "Password is required.";
-  else if (trim(data.passwordHash).length < PASSWORD_MIN_LENGTH) {
+  if (!isNonEmpty(pwd)) errors.passwordHash = "Password is required.";
+  else if (pwd.length < PASSWORD_MIN_LENGTH) {
     errors.passwordHash = `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`;
   }
   if (!isNonEmpty(data.confirmPassword)) {
     errors.confirmPassword = "Please confirm your password.";
-  } else if (trim(data.passwordHash) !== trim(data.confirmPassword)) {
+  } else if (pwd !== trim(data.confirmPassword)) {
     errors.confirmPassword = "Passwords do not match.";
   }
   return { valid: Object.keys(errors).length === 0, errors };
@@ -86,6 +93,8 @@ export function validateClientProfile(form) {
   const errors = {};
   if (!isNonEmpty(form.firstName)) errors.firstName = "First name is required.";
   if (!isNonEmpty(form.lastName)) errors.lastName = "Last name is required.";
+  if (!isNonEmpty(form.email)) errors.email = "Email is required.";
+  else if (!isValidEmail(form.email)) errors.email = "Enter a valid email address.";
   if (!isNonEmpty(form.phone)) errors.phone = "Phone number is required.";
   else if (!isValidIndiaMobile(form.phone)) {
     errors.phone = "Enter a valid 10-digit mobile number.";
@@ -97,12 +106,14 @@ export function validateVendorProfile(form) {
   const errors = {};
   if (!isNonEmpty(form.name)) errors.name = "Business name is required.";
   if (!isNonEmpty(form.location)) errors.location = "Location is required.";
+  if (!isNonEmpty(form.email)) errors.email = "Email is required.";
+  else if (!isValidEmail(form.email)) errors.email = "Enter a valid email address.";
   if (!isNonEmpty(form.phone)) errors.phone = "Phone number is required.";
   else if (!isValidIndiaMobile(form.phone)) {
     errors.phone = "Enter a valid 10-digit mobile number.";
   }
   if (!isNonEmpty(form.experience)) errors.experience = "Experience is required.";
-  if (!isNonEmpty(form.priceRange)) errors.priceRange = "Price range is required.";
+  // priceRange is display-only in the vendor edit modal (not sent on update); allow empty when API has no range
   if (!isNonEmpty(form.description)) errors.description = "Description is required.";
   return { valid: Object.keys(errors).length === 0, errors };
 }
@@ -128,5 +139,55 @@ export function validateBookingStep2(data) {
   }
   if (!isNonEmpty(data.contactEmail)) errors.contactEmail = "Email is required.";
   else if (!isValidEmail(data.contactEmail)) errors.contactEmail = "Enter a valid email address.";
+  return { valid: Object.keys(errors).length === 0, errors };
+}
+
+/** Event search / plan form (SearchAndBook) before finding vendors */
+export function validateEventPlanSearch({
+  eventType,
+  selectedState,
+  selectedCity,
+  location,
+  date,
+  guestCount,
+  selectedServices,
+}) {
+  const errors = {};
+  const etId = eventType?.eventTypeId;
+  if (etId === undefined || etId === null || etId === "") {
+    errors.eventType = "Select an event type.";
+  }
+  if (!selectedState || !selectedCity || !isNonEmpty(location)) {
+    errors.location = "Select state and city.";
+  }
+  if (!isNonEmpty(date)) errors.date = "Select event date.";
+  const g = Number(guestCount);
+  if (!isNonEmpty(guestCount) || Number.isNaN(g) || g < 1) {
+    errors.guestCount = "Enter a valid guest count (at least 1).";
+  }
+  const n = Object.values(selectedServices || {}).filter(Boolean).length;
+  if (n === 0) errors.services = "Select at least one service.";
+  return { valid: Object.keys(errors).length === 0, errors };
+}
+
+/** Vendor onboarding required fields (matches VendorOnboarding submit rules) */
+export function validateVendorOnboardingForm(form, selectedState, selectedCity) {
+  const errors = {};
+  if (!isNonEmpty(form.businessName)) errors.businessName = "Company name is required.";
+  if (!form.servicesProvided || form.servicesProvided.length === 0) {
+    errors.servicesProvided = "Select at least one service.";
+  }
+  if (!isNonEmpty(form.businessAddress)) errors.businessAddress = "Address is required.";
+  if (!selectedState) errors.state = "Select state.";
+  if (!selectedCity) errors.city = "Select city.";
+  if (!isValidPincodeIN(String(form.pincode || ""))) {
+    errors.pincode = "Enter a valid 6-digit pincode.";
+  }
+  if (trim(form.businessEmail) && !isValidEmail(form.businessEmail)) {
+    errors.businessEmail = "Enter a valid email or leave blank.";
+  }
+  if (trim(form.businessPhone) && !isValidIndiaMobile(form.businessPhone)) {
+    errors.businessPhone = "Enter a valid 10-digit phone or leave blank.";
+  }
   return { valid: Object.keys(errors).length === 0, errors };
 }
